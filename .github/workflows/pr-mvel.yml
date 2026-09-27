@@ -1,0 +1,55 @@
+name: Mvel PR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mvel-build:
+    concurrency:
+      group: pr-mvel_${{ matrix.os }}_${{ matrix.java-version }}_${{ 
+        matrix.maven-version }}_${{ github.head_ref }}
+      cancel-in-progress: true
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: macos-latest
+          java-version: 17
+          maven-version: '3.9.12'
+          arch: arm64
+          runner: macos-latest
+          expander_leg: macos-latest--arm64
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.os }} / Java-${{ matrix.java-version }} / Maven-${{ 
+      matrix.maven-version }} [${{ matrix.expander_leg }}]
+    steps:
+      # javaparser-mvel has test resources whose paths exceed the Windows MAX_PATH limit;
+      # the windows-11-arm image does not enable long path support in git by default
+    - name: Enable git long paths
+      run: git config --global core.longpaths true
+
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Java and Maven Setup
+      uses: actions/setup-java@v2
+      with:
+        java-version: ${{ matrix.java-version }}
+        distribution: 'temurin'
+        maven-version: ${{ matrix.maven-version }}
+
+      # mvel3 requires a custom javaparser for mvel AST nodes
+    - name: Checkout javaparser-mvel
+      uses: actions/checkout@v2
+      with:
+        repository: mvel/javaparser-mvel
+        ref: main
+        path: javaparser-mvel
+
+    - name: Build and install javaparser-mvel
+      run: mvn -B clean install -DskipTests
+      working-directory: javaparser-mvel
+
+    - name: Build with Maven
+      run: mvn -B clean verify
