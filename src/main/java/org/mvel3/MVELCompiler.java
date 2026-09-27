@@ -1,0 +1,326 @@
+/*
+ * Copyright 2021 Red Hat, Inc. and/or its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.mvel3;
+
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.NodeList;
+import com.github.javaparser.ast.PackageDeclaration;
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
+import com.github.javaparser.ast.expr.CastExpr;
+import com.github.javaparser.ast.expr.IntegerLiteralExpr;
+import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.Name;
+import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.expr.StringLiteralExpr;
+import com.github.javaparser.ast.expr.VariableDeclarationExpr;
+import com.github.javaparser.ast.stmt.ExpressionStmt;
+import com.github.javaparser.ast.stmt.Statement;
+import com.github.javaparser.ast.type.Type;
+import com.github.javaparser.resolution.MethodUsage;
+import com.github.javaparser.resolution.declarations.ResolvedReferenceTypeDeclaration;
+import com.github.javaparser.resolution.types.ResolvedType;
+import org.mvel3.javacompiler.KieMemoryCompiler;
+import org.mvel3.lambdaextractor.LambdaCatalog;
+import org.mvel3.lambdaextractor.LambdaKey;
+import org.mvel3.lambdaextractor.ArtifactRef;
+import org.mvel3.lambdaextractor.LambdaArtifactLoader;
+import org.mvel3.lambdaextractor.LambdaRuntime;
+import org.mvel3.lambdaextractor.LambdaUtils;
+import org.mvel3.transpiler.MVELToJavaRewriter;
+import org.mvel3.parser.printer.PrintUtil;
+import org.mvel3.transpiler.EvalPre;
+import org.mvel3.transpiler.MVELTranspiler;
+import org.mvel3.transpiler.TranspiledResult;
+import org.mvel3.transpiler.context.Declaration;
+import org.mvel3.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import static org.mvel3.transpiler.MVELTranspiler.handleParserResult;
+
+public class MVELCompiler {
+
+    private static final Logger log = LoggerFactory.getLogger(MVELCompiler.class);
+
+    /**
+     * Process-wide counter of actual MVEL compile invocations (i.e. paths that
+     * called {@code KieMemoryCompiler.compile} or {@code compileAndPersist} for
+     * a NEW lambda, not reuse-from-disk).
+     * <p>
+     * Test-only instrumentation. NOT part of the long-term public compiler API.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger COMPILE_INVOCATIONS =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    public static int compileInvocationCount() { return COMPILE_INVOCATIONS.get(); }
+    public static void resetCompileInvocationCountForTests() { COMPILE_INVOCATIONS.set(0); }
+    /** Package-private: used by {@link MVELBatchCompiler} when its bulk compile runs. */
+    static void bumpCompileInvocationCount() { COMPILE_INVOCATIONS.incrementAndGet(); }
+
+    public record TranspiledSource(String fqn, String javaSource) {}
+
+    public <T, K, R> Evaluator<T, K, R> compile(CompilerParameters<T, K, R> info) {
+        CompilationUnit unit = compileNoLoad(info);
+        Evaluator<T, K, R> evaluator = compileEvaluator(unit, info);
+
+        return evaluator;
+    }
+
+    public <T, K, R> TranspiledSource transpileToSource(CompilerParameters<T, K, R> info) {
+        CompilationUnit unit = compileNoLoad(info);
+        String fqn = evaluatorFullQualifiedName(unit);
+        String source = PrintUtil.printNode(unit);
+        return new TranspiledSource(fqn, source);
+    }
+
+    public <T, K, R> CompilationUnit transpileToCompilationUnit(CompilerParameters<T, K, R> info) {
+        return compileNoLoad(info);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T resolveEvaluator(ClassManager classManager, String fqn) {
+        Class<T> clazz = classManager.getClass(fqn);
+        try {
+            return (T) clazz.getConstructor().newInstance();
+        } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+            throw new RuntimeException("Failed to instantiate evaluator: " + fqn, e);
+        }
+    }
+
+    public <T, K, R> TranspiledResult transpile(CompilerParameters<T, K, R> info) {
+        EvalPre  evalPre;
+        if ( info.contextDeclaration().type().isVoid()) {
+            evalPre = (evalInfo, context, statements) -> statements;
+        } else {
+            switch (info.contextDeclaration().type().getClazz().getSimpleName()) {
+                case "Map":
+                    evalPre = (evalInfo, context, statements) -> {
+                        NodeList tempStmts = new NodeList<Statement>();
+                        context.getInputs().stream().forEach(var -> {
+                            Declaration declr = evalInfo.allVars().get(var);
+
+                            MethodCallExpr methodCallExpr = new MethodCallExpr(new NameExpr(evalInfo.contextDeclaration().name()),
+                                                                               "get", NodeList.nodeList(new StringLiteralExpr(declr.name())));
+                            Type castType = handleParserResult(context.getParser().parseType(declr.type().getCanonicalGenericsName()));
+                            CastExpr castExpr = new CastExpr(castType.clone(),
+                                                             methodCallExpr);
+
+                            VariableDeclarator varDeclr = new VariableDeclarator(castType, declr.name());
+                            varDeclr.setInitializer(castExpr);
+                            VariableDeclarationExpr varDeclExpr = new VariableDeclarationExpr(varDeclr);
+
+                            tempStmts.add(new ExpressionStmt(varDeclExpr));
+                        });
+
+                        tempStmts.addAll(statements);
+
+                        return tempStmts;
+                    };
+                    break;
+                case "List":
+                    evalPre = (evalInfo, context, statements) -> {
+                        NodeList tempStmts = new NodeList<Statement>();
+
+                        for (int i = 0; i < evalInfo.variableDeclarations().size(); i++) {
+                            Declaration declr = evalInfo.variableDeclarations().get(i);
+                            if (context.getInputs().contains(declr.name())) {
+                                MethodCallExpr methodCallExpr = new MethodCallExpr(new NameExpr(evalInfo.contextDeclaration().name()), "get", NodeList.nodeList(new IntegerLiteralExpr(i)));
+                                CastExpr castExpr = new CastExpr(handleParserResult(context.getParser().parseType(declr.type().getCanonicalGenericsName())),
+                                                                 methodCallExpr);
+
+                                Type               castType = handleParserResult(context.getParser().parseType(declr.type().getCanonicalGenericsName()));
+                                VariableDeclarator varDeclr = new VariableDeclarator(castType, declr.name());
+                                varDeclr.setInitializer(castExpr);
+                                VariableDeclarationExpr varDeclExpr = new VariableDeclarationExpr(varDeclr);
+
+                                tempStmts.add(new ExpressionStmt(varDeclExpr));
+                            }
+                        }
+
+                        tempStmts.addAll(statements);
+
+                        return tempStmts;
+                    };
+                    break;
+                default: // pojo
+                    evalPre = (evalInfo, context, statements) -> {
+                        NodeList tempStmts = new NodeList<Statement>();
+                        context.getInputs().stream().forEach(var -> {
+                            Declaration declr = evalInfo.allVars().get(var);
+
+                            ResolvedType                     resolvedType = context.getFacade().getSymbolSolver().classToResolvedType(info.contextDeclaration().type().getClazz());
+                            ResolvedReferenceTypeDeclaration d            = resolvedType.asReferenceType().getTypeDeclaration().get();
+
+                            MethodUsage method = MVELToJavaRewriter.findGetterSetter("get", declr.name(), 0, d);
+
+                            MethodCallExpr methodCallExpr = new MethodCallExpr(new NameExpr(info.contextDeclaration().name()), method.getName());
+
+                            Type targetType = handleParserResult(context.getParser().parseType(declr.type().getCanonicalGenericsName()));
+
+                            VariableDeclarator varDeclr = new VariableDeclarator(targetType, declr.name());
+                            varDeclr.setInitializer(methodCallExpr);
+                            VariableDeclarationExpr varDeclExpr = new VariableDeclarationExpr(varDeclr);
+
+                            tempStmts.add(new ExpressionStmt(varDeclExpr));
+                        });
+
+                        tempStmts.addAll(statements);
+
+                        return tempStmts;
+                    };
+            }
+        }
+
+        TranspiledResult input = MVELTranspiler.transpile(info, evalPre);
+
+        return input;
+    }
+
+    private <T, K, R> CompilationUnit compileNoLoad(CompilerParameters<T, K, R> info) {
+        TranspiledResult input = transpile(info);
+
+        CompilationUnit unit = new CompilationUnitGenerator(input.getTranspilerContext().getParser()).createCompilationUnit(input, info);
+
+        ClassFilterValidator.validate(unit, info.classFilter(), info.classLoader());
+
+        return unit;
+    }
+
+    private <C, W, O> Evaluator<C, W, O> compileEvaluator(CompilationUnit unit, CompilerParameters<C, W, O> info) {
+        String javaFQN = evaluatorFullQualifiedName(unit);
+        ClassManager clsManager = info.classManager();
+        if (clsManager == null) {
+            clsManager = new ClassManager();
+        }
+
+        if (LambdaRuntime.isPersistenceEnabled()) {
+            // return the new class name
+            javaFQN = compileEvaluatorClassWithPersistence(clsManager, info.classLoader(), unit, javaFQN);
+        } else {
+            compileEvaluatorClass(clsManager, info.classLoader(), unit, javaFQN);
+        }
+
+        Class<Evaluator<C, W, O>> evaluatorDefinition = clsManager.getClass(javaFQN);
+
+        Evaluator<C, W, O> evaluator = createEvaluatorInstance(evaluatorDefinition);
+
+        return evaluator;
+    }
+
+    public Method getMethod(Class contextClass, String var)  {
+        Method method = null;
+        try {
+            String getterName = "get" + StringUtils.ucFirst(var);
+            method = contextClass.getMethod(getterName);
+        } catch (NoSuchMethodException e) {
+            // swallow
+        }
+
+        try {
+            method = contextClass.getMethod(var);
+        } catch (NoSuchMethodException e) {
+            // swallow
+        }
+
+        return method;
+    }
+
+
+    record LambdaRegistration(int physicalId, String newFqn) {}
+
+    static LambdaRegistration registerAndRename(CompilationUnit unit, String currentFqn) {
+        return registerAndRename(unit, currentFqn, LambdaRuntime.getInstance().catalog());
+    }
+
+    static LambdaRegistration registerAndRename(CompilationUnit unit, String currentFqn, LambdaCatalog catalog) {
+        MethodDeclaration methodDeclaration = unit.findFirst(MethodDeclaration.class).orElseThrow();
+        LambdaKey lambdaKey = LambdaUtils.createLambdaKeyFromMethodDeclaration(methodDeclaration);
+        int physicalId = catalog.register(lambdaKey).physicalId();
+        String oldClassName = currentFqn.substring(currentFqn.lastIndexOf('.') + 1);
+        String newClassName = oldClassName + "_" + physicalId;
+        ClassOrInterfaceDeclaration classOrInterfaceDeclaration = unit.findFirst(ClassOrInterfaceDeclaration.class).orElseThrow();
+        classOrInterfaceDeclaration.setName(newClassName);
+        String newFqn = currentFqn.substring(0, currentFqn.lastIndexOf('.') + 1) + newClassName;
+        return new LambdaRegistration(physicalId, newFqn);
+    }
+
+    static String evaluatorFullQualifiedName(CompilationUnit evaluatorCompilationUnit) {
+        ClassOrInterfaceDeclaration evaluatorClass = evaluatorCompilationUnit
+                .findFirst(ClassOrInterfaceDeclaration.class)
+                .orElseThrow(() -> new RuntimeException("class expected"));
+
+        String evaluatorClassName = evaluatorClass.getNameAsString();
+        Name packageName = evaluatorCompilationUnit.getPackageDeclaration().map(PackageDeclaration::getName)
+                .orElseThrow(() -> new RuntimeException("No package in template"));
+        return String.format("%s.%s", packageName, evaluatorClassName);
+    }
+
+    private <T> T createEvaluatorInstance(Class<T> evaluatorDefinition) {
+        T evaluator;
+        try {
+            evaluator = (T) evaluatorDefinition.getConstructor().newInstance();
+        } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+            throw new RuntimeException(e);
+        }
+        return evaluator;
+    }
+
+    private void compileEvaluatorClass(ClassManager classManager, ClassLoader classLoader, CompilationUnit compilationUnit, String javaFQN) {
+        Map<String, String> sources = Collections.singletonMap(
+                javaFQN,
+                PrintUtil.printNode(compilationUnit)
+        );
+        KieMemoryCompiler.compile(classManager, sources, classLoader);
+        COMPILE_INVOCATIONS.incrementAndGet();
+    }
+
+    private String compileEvaluatorClassWithPersistence(ClassManager classManager, ClassLoader classLoader, CompilationUnit compilationUnit, String javaFQN) {
+        LambdaRegistration reg = registerAndRename(compilationUnit, javaFQN);
+        int physicalId = reg.physicalId();
+        String newJavaFQN = reg.newFqn();
+
+        LambdaRuntime rt = LambdaRuntime.getInstance();
+        if (rt.persistenceManager().artifactExists(physicalId)) {
+            ArtifactRef ref = rt.persistenceManager().artifactFor(physicalId).orElseThrow();
+            log.info("Reading the persisted lambda class {}", newJavaFQN);
+            try {
+                LambdaArtifactLoader.loadOrDefinePersistedClass(classManager, ref);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to load persisted lambda class from " + ref.classFile(), e);
+            }
+        } else {
+            String newSource = PrintUtil.printNode(compilationUnit);
+            Map<String, String> sources = Collections.singletonMap(newJavaFQN, newSource);
+            log.info("Persisting lambda class {}", newJavaFQN);
+            List<Path> persistedFiles = KieMemoryCompiler.compileAndPersist(classManager, sources, classLoader, null, rt.config().persistenceRoot());
+            COMPILE_INVOCATIONS.incrementAndGet();
+            rt.persistenceManager().attachArtifact(physicalId, new ArtifactRef(newJavaFQN, persistedFiles.get(0)));
+        }
+
+        return newJavaFQN;
+    }
+}

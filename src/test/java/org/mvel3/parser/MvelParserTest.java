@@ -1,0 +1,1392 @@
+/*
+ * Copyright (C) 2007-2010 Júlio Vilmar Gesser.
+ * Copyright (C) 2011, 2013-2016 The JavaParser Team.
+ * Copyright 2019 Red Hat, Inc. and/or its affiliates.
+ *
+ * This file is part of JavaParser.
+ *
+ * JavaParser can be used either under the terms of
+ * a) the GNU Lesser General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ * b) the terms of the Apache License
+ *
+ * You should have received a copy of both licenses in LICENCE.LGPL and
+ * LICENCE.APACHE. Please refer to those files for details.
+ *
+ * JavaParser is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * Modified by Red Hat, Inc.
+ */
+
+package org.mvel3.parser;
+
+import com.github.javaparser.ParseProblemException;
+import com.github.javaparser.ParseResult;
+import com.github.javaparser.ParserConfiguration;
+import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.expr.BinaryExpr;
+import com.github.javaparser.ast.expr.BinaryExpr.Operator;
+import com.github.javaparser.ast.expr.EnclosedExpr;
+import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.FieldAccessExpr;
+import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.SimpleName;
+import com.github.javaparser.ast.stmt.BlockStmt;
+import com.github.javaparser.ast.type.Type;
+
+import org.apache.commons.lang3.SystemUtils;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
+import org.mvel3.TranspilerTest;
+import org.mvel3.parser.ast.expr.DrlNameExpr;
+import org.mvel3.parser.ast.expr.DrlxExpression;
+import org.mvel3.parser.ast.expr.HalfBinaryExpr;
+import org.mvel3.parser.ast.expr.HalfPointFreeExpr;
+import org.mvel3.parser.ast.expr.NullSafeFieldAccessExpr;
+import org.mvel3.parser.ast.expr.OOPathChunk;
+import org.mvel3.parser.ast.expr.OOPathExpr;
+import org.mvel3.parser.ast.expr.PointFreeExpr;
+import org.mvel3.parser.ast.expr.TemporalLiteralChunkExpr;
+import org.mvel3.parser.ast.expr.TemporalLiteralExpr;
+import org.mvel3.parser.printer.PrintUtil;
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mvel3.parser.DrlxParser.parseExpression;
+import static org.mvel3.parser.printer.PrintUtil.printNode;
+
+@Disabled("TBD : This test is specific to javaparser. Fully migrate to Antlr4MvelParserTest")
+class MvelParserTest implements TranspilerTest {
+
+    private static final Collection<String> operators = new HashSet<>();
+    static {
+        operators.addAll(Arrays.asList("after", "before", "in", "matches", "includes"));
+    }
+
+    final ParseStart<DrlxExpression> parser = DrlxParser.buildDrlxParserWithArguments(operators);
+
+    // This test is only for JavaParser AST. So USE_ANTLR is set to false.
+    @BeforeAll
+    static void enableAntlrParser() {
+        MvelParser.Factory.USE_ANTLR = false;
+    }
+
+    @Test
+    void testParseSimpleExpr() {
+        String expr = "name == \"Mark\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+
+        BinaryExpr binaryExpr = ( (BinaryExpr) expression );
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mark\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+    }
+
+    @Test
+    void testBinaryWithNewLine() {
+        Expression or = parseExpression(parser, "(addresses == 2 ||\n" +
+                "                   addresses == 3  )").getExpr();
+        assertThat(printNode(or)).isEqualTo("(addresses == 2 || addresses == 3)");
+
+        Expression and = parseExpression(parser, "(addresses == 2 &&\n addresses == 3  )").getExpr();
+        assertThat(printNode(and)).isEqualTo("(addresses == 2 && addresses == 3)");
+    }
+
+    @Test
+    void testBinaryWithWindowsNewLine() {
+        Expression or = parseExpression(parser, "(addresses == 2 ||\r\n" +
+                "                   addresses == 3  )").getExpr();
+        assertThat(printNode(or)).isEqualTo("(addresses == 2 || addresses == 3)");
+
+        Expression and = parseExpression(parser, "(addresses == 2 &&\r\n addresses == 3  )").getExpr();
+        assertThat(printNode(and)).isEqualTo("(addresses == 2 && addresses == 3)");
+    }
+
+    @Test
+    void testBinaryWithNewLineBeginning() {
+        Expression or = parseExpression(parser, "(" + newLine() + "addresses == 2 || addresses == 3  )").getExpr();
+        assertThat(printNode(or)).isEqualTo("(addresses == 2 || addresses == 3)");
+
+        Expression and = parseExpression(parser, "(" + newLine() + "addresses == 2 && addresses == 3  )").getExpr();
+        assertThat(printNode(and)).isEqualTo("(addresses == 2 && addresses == 3)");
+    }
+
+    @Test
+    void testBinaryWithNewLineEnd() {
+        Expression or = parseExpression(parser, "(addresses == 2 || addresses == 3 " + newLine() + ")").getExpr();
+        assertThat(printNode(or)).isEqualTo("(addresses == 2 || addresses == 3)");
+
+        Expression and = parseExpression(parser, "(addresses == 2 && addresses == 3 " + newLine() + ")").getExpr();
+        assertThat(printNode(and)).isEqualTo("(addresses == 2 && addresses == 3)");
+    }
+
+    @Test
+    void testBinaryWithNewLineBeforeOperator() {
+        String andExpr = "(addresses == 2" + newLine() + "&& addresses == 3  )";
+        StaticMvelParser mvelParser1 = new StaticMvelParser(new ParserConfiguration(), true);
+        Expression and2 = mvelParser1.parse(GeneratedMvelParser::Expression, new StringProvider(andExpr)).getResult().get();
+        assertThat(printNode(and2)).isEqualTo("(addresses == 2 && addresses == 3)");
+
+        String orExpr = "(addresses == 2" + newLine() + "|| addresses == 3  )";
+        StaticMvelParser mvelParser2 = new StaticMvelParser(new ParserConfiguration(), false);
+        Expression or2 = mvelParser2.parse(GeneratedMvelParser::Expression, new StringProvider(orExpr)).getResult().get();
+        assertThat(printNode(or2)).isEqualTo("(addresses == 2 || addresses == 3)");
+    }
+
+    @Test
+    void testParseSafeCastExpr() {
+        String expr = "this instanceof Person && ((Person) this).name == \"Mark\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        verifyBodyWithBetterDiff(printNode(expression),expr);
+    }
+
+    @Test
+    void testParseInlineCastExpr() {
+        String expr = "this#Person#.name == \"Mark\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testParseInlineCastExpr2() {
+        String expr = "address#com.pkg.InternationalAddress#.state.length == 5";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testParseInlineCastExpr3() {
+        String expr = "address#org.mvel3.compiler.LongAddress#.country.substring(1)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testParseInlineCastExpr4() {
+        String expr = "address#com.pkg.InternationalAddress#.getState().length == 5";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testParseNullSafeFieldAccessExpr() {
+        String expr = "person?.name == \"Mark\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testDotFreeExpr() {
+        String expr = "this after $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testDotFreeEnclosed() {
+        String expr = "(this after $a)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testDotFreeEnclosedWithNameExpr() {
+        String expr = "(something after $a)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+
+    @Test
+    void testLiteral() {
+        String bigDecimalLiteral = "bigInteger < (50B)";
+        Expression bigDecimalExpr = parseExpression( parser, bigDecimalLiteral ).getExpr();
+        assertThat(printNode(bigDecimalExpr)).isEqualTo(bigDecimalLiteral);
+
+        String bigIntegerLiteral = "bigInteger == (50I)";
+        Expression bigIntegerExpr = parseExpression( parser, bigIntegerLiteral ).getExpr();
+        assertThat(printNode(bigIntegerExpr)).isEqualTo(bigIntegerLiteral);
+    }
+
+    @Test
+    void testBigDecimalLiteral() {
+        String bigDecimalLiteralWithDecimals = "12.111B";
+        Expression bigDecimalExprWithDecimals = parseExpression( parser, bigDecimalLiteralWithDecimals ).getExpr();
+        assertThat(printNode(bigDecimalExprWithDecimals)).isEqualTo(bigDecimalLiteralWithDecimals);
+    }
+
+    @Test
+    void testDotFreeExprWithOr() {
+        String expr = "this after $a || this after $b";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof BinaryExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testDotFreeExprWithArgs() {
+        String expr = "this after[5,8] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(((PointFreeExpr) expression).isNegated()).isFalse();
+        assertThat(printNode(expression)).isEqualTo("this after[5ms,8ms] $a"); // please note the parsed expression once normalized would take the time unit for milliseconds.
+    }
+
+    @Test
+    void testDotFreeExprWithArgsInfinite() {
+        String expr = "this after[5s,*] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(((PointFreeExpr) expression).isNegated()).isFalse();
+        assertThat(printNode(expression)).isEqualTo("this after[5s,*] $a"); // please note the parsed expression once normalized would take the time unit for milliseconds.
+    }
+
+    @Test
+    void testDotFreeExprWithThreeArgsInfinite() {
+        String expr = "this after[*,*,*,2s] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(((PointFreeExpr) expression).isNegated()).isFalse();
+        assertThat(printNode(expression)).isEqualTo("this after[*,*,*,2s] $a"); // please note the parsed expression once normalized would take the time unit for milliseconds.
+    }
+
+
+    @Test
+    void testDotFreeExprWithArgsNegated() {
+        String expr = "this not after[5,8] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression).isInstanceOf(PointFreeExpr.class);
+        assertThat(((PointFreeExpr) expression).isNegated()).isTrue();
+        assertThat(printNode(expression)).isEqualTo("this not after[5ms,8ms] $a"); // please note the parsed expression once normalized would take the time unit for milliseconds.
+    }
+
+    @Test
+    void testDotFreeExprWithTemporalArgs() {
+        String expr = "this after[5ms,8d] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testDotFreeExprWithFourTemporalArgs() {
+        String expr = "this includes[1s,1m,1h,1d] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testHalfDotFreeExprWithFourTemporalArgs() {
+        String expr = "includes[1s,1m,1h,1d] $a";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression).isInstanceOf(HalfPointFreeExpr.class);
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testInvalidTemporalArgs() {
+        assertThrows(ParseProblemException.class, () -> {
+            String expr = "this after[5ms,8f] $a";
+            Expression expression = parseExpression( parser, expr ).getExpr();
+        });
+    }
+
+    @Test
+    void testOOPathExpr() {
+        String expr = "/wife/children[age > 10]/toys";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        Expression expression = drlx.getExpr();
+        assertThat(expression instanceof OOPathExpr).isTrue();
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testOOPathExprWithDot() {
+        String expr = "/wife.children/toys";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        Expression expression = drlx.getExpr();
+        assertThat(expression instanceof OOPathExpr).isTrue();
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testOOPathExprWithMultipleCondition() {
+        String expr = "$address : /address[street == \"Elm\",city == \"Big City\"]";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        Expression expression = drlx.getExpr();
+        assertThat(expression instanceof OOPathExpr).isTrue();
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testOOPathExprWithDeclaration() {
+        String expr = "$toy : /wife/children[age > 10]/toys";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        assertThat(drlx.getBind().asString()).isEqualTo("$toy");
+        Expression expression = drlx.getExpr();
+        assertThat(expression instanceof OOPathExpr).isTrue();
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testOOPathExprWithBackReference() {
+        String expr = "$toy : /wife/children/toys[name.length == ../../name.length]";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        assertThat(drlx.getBind().asString()).isEqualTo("$toy");
+        Expression expression = drlx.getExpr();
+        assertThat(expression instanceof OOPathExpr).isTrue();
+
+        final OOPathChunk secondChunk = ((OOPathExpr) expression).getChunks().get(2);
+        final BinaryExpr secondChunkFirstCondition = (BinaryExpr) secondChunk.getConditions().get(0).getExpr();
+        final DrlNameExpr rightName = (DrlNameExpr) ((FieldAccessExpr)secondChunkFirstCondition.getRight()).getScope();
+        assertThat(rightName.getBackReferencesCount()).isEqualTo(2);
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testMapInitializationEmpty() {
+        String expr = "countItems([])";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testMapInitializationLiteralAsArgument() {
+        String expr = "countItems([123 : 456, 789 : 1011])";
+        DrlxExpression drlx = parseExpression( parser, expr );
+        assertThat(printNode(drlx)).isEqualTo(expr);
+    }
+
+    @Test
+    void testParseTemporalLiteral() {
+        String expr = "5s";
+        TemporalLiteralExpr drlx = DrlxParser.parseTemporalLiteral(expr);
+        assertThat(printNode(drlx)).isEqualTo(expr);
+        assertThat(drlx.getChunks().size()).isEqualTo(1);
+        TemporalLiteralChunkExpr chunk0 = (TemporalLiteralChunkExpr) drlx.getChunks().get(0);
+        assertThat(chunk0.getValue()).isEqualTo(5);
+        assertThat(chunk0.getTimeUnit()).isEqualTo(TimeUnit.SECONDS);
+    }
+
+    @Test
+    void testParseTemporalLiteralOf2Chunks() {
+        String expr = "1m5s";
+        TemporalLiteralExpr drlx = DrlxParser.parseTemporalLiteral(expr);
+        assertThat(printNode(drlx)).isEqualTo(expr);
+        assertThat(drlx.getChunks().size()).isEqualTo(2);
+        TemporalLiteralChunkExpr chunk0 = (TemporalLiteralChunkExpr) drlx.getChunks().get(0);
+        assertThat(chunk0.getValue()).isEqualTo(1);
+        assertThat(chunk0.getTimeUnit()).isEqualTo(TimeUnit.MINUTES);
+        TemporalLiteralChunkExpr chunk1 = (TemporalLiteralChunkExpr) drlx.getChunks().get(1);
+        assertThat(chunk1.getValue()).isEqualTo(5);
+        assertThat(chunk1.getTimeUnit()).isEqualTo(TimeUnit.SECONDS);
+    }
+
+    @Test
+    void testInExpression() {
+        String expr = "this in ()";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof PointFreeExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    /* This shouldn't be supported, an HalfBinaryExpr should be valid only after a && or a || */
+    void testUnsupportedImplicitParameter() {
+        String expr = "== \"Mark\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression instanceof HalfBinaryExpr).isTrue();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testAndWithImplicitNegativeParameter() {
+        String expr = "value > -2 && < -1";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExpr.getLeft();
+        assertThat(toString(first.getLeft())).isEqualTo("value");
+        assertThat(toString(first.getRight())).isEqualTo("-2");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("-1");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesis() {
+        String expr = "value (> 1 && < 2)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExpr.getLeft();
+        assertThat(toString(first.getLeft())).isEqualTo("value");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisOnThis() {
+        String expr = "this (> 1 && < 2)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExpr.getLeft();
+        assertThat(toString(first.getLeft())).isEqualTo("this");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisComplex() {
+        String expr = "value ((> 1 && < 2) || (> 3 && < 4))";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr comboExprLeft = ( (BinaryExpr) comboExpr.getLeft() );
+        assertThat(comboExprLeft.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExprLeft.getLeft();
+        assertThat(toString(first.getLeft())).isEqualTo("value");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExprLeft.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+
+        BinaryExpr comboExprRight = ( (BinaryExpr) comboExpr.getRight() );
+        assertThat(comboExprRight.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr third = (BinaryExpr) comboExprRight.getLeft();
+        assertThat(toString(third.getLeft())).isEqualTo("value");
+        assertThat(toString(third.getRight())).isEqualTo("3");
+        assertThat(third.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr forth = (HalfBinaryExpr) comboExprRight.getRight();
+        assertThat(toString(forth.getRight())).isEqualTo("4");
+        assertThat(forth.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisComplexOnField() {
+        String expr = "value.length ((> 1 && < 2) || (> 3 && < 4))";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr comboExprLeft = ( (BinaryExpr) comboExpr.getLeft() );
+        assertThat(comboExprLeft.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExprLeft.getLeft();
+        assertThat(first.getLeft() instanceof FieldAccessExpr).isTrue();
+        assertThat(toString(first.getLeft())).isEqualTo("value.length");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExprLeft.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+
+        BinaryExpr comboExprRight = ( (BinaryExpr) comboExpr.getRight() );
+        assertThat(comboExprRight.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr third = (BinaryExpr) comboExprRight.getLeft();
+        assertThat(toString(third.getLeft())).isEqualTo("value.length");
+        assertThat(toString(third.getRight())).isEqualTo("3");
+        assertThat(third.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr forth = (HalfBinaryExpr) comboExprRight.getRight();
+        assertThat(toString(forth.getRight())).isEqualTo("4");
+        assertThat(forth.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisComplexOnNullSafeField() {
+        String expr = "value!.length ((> 1 && < 2) || (> 3 && < 4))";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr comboExprLeft = ( (BinaryExpr) comboExpr.getLeft() );
+        assertThat(comboExprLeft.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExprLeft.getLeft();
+        assertThat(first.getLeft() instanceof NullSafeFieldAccessExpr).isTrue();
+        assertThat(toString(first.getLeft())).isEqualTo("value!.length");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExprLeft.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+
+        BinaryExpr comboExprRight = ( (BinaryExpr) comboExpr.getRight() );
+        assertThat(comboExprRight.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr third = (BinaryExpr) comboExprRight.getLeft();
+        assertThat(toString(third.getLeft())).isEqualTo("value!.length");
+        assertThat(toString(third.getRight())).isEqualTo("3");
+        assertThat(third.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr forth = (HalfBinaryExpr) comboExprRight.getRight();
+        assertThat(toString(forth.getRight())).isEqualTo("4");
+        assertThat(forth.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisMixedLeft() {
+        String expr = "value ((> 1 && < 2) || > 3)";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr comboExprLeft = ( (BinaryExpr) comboExpr.getLeft() );
+        assertThat(comboExprLeft.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = (BinaryExpr) comboExprLeft.getLeft();
+        assertThat(toString(first.getLeft())).isEqualTo("value");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) comboExprLeft.getRight();
+        assertThat(toString(second.getRight())).isEqualTo("2");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+
+        BinaryExpr third = ( (BinaryExpr) comboExpr.getRight() );
+        assertThat(toString(third.getLeft())).isEqualTo("value");
+        assertThat(toString(third.getRight())).isEqualTo("3");
+        assertThat(third.getOperator()).isEqualTo(Operator.GREATER);
+    }
+
+    @Test
+    void testAndWithImplicitParameterAndParenthesisMixedRight() {
+        String expr = "value (< 1 || (> 2 && < 3))";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr first = ( (BinaryExpr) comboExpr.getLeft() );
+        assertThat(toString(first.getLeft())).isEqualTo("value");
+        assertThat(toString(first.getRight())).isEqualTo("1");
+        assertThat(first.getOperator()).isEqualTo(Operator.LESS);
+
+        BinaryExpr comboExprRight = ( (BinaryExpr) comboExpr.getRight() );
+        assertThat(comboExprRight.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr third = (BinaryExpr) comboExprRight.getLeft();
+        assertThat(toString(third.getLeft())).isEqualTo("value");
+        assertThat(toString(third.getRight())).isEqualTo("2");
+        assertThat(third.getOperator()).isEqualTo(Operator.GREATER);
+
+        HalfBinaryExpr forth = (HalfBinaryExpr) comboExprRight.getRight();
+        assertThat(toString(forth.getRight())).isEqualTo("3");
+        assertThat(forth.getOperator()).isEqualTo(HalfBinaryExpr.Operator.LESS);
+    }
+
+    @Test
+    void testOrWithImplicitParameter() {
+        String expr = "name == \"Mark\" || == \"Mario\" || == \"Luca\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+
+        BinaryExpr first = ((BinaryExpr)((BinaryExpr) comboExpr.getLeft()).getLeft());
+        assertThat(toString(first.getLeft())).isEqualTo("name");
+        assertThat(toString(first.getRight())).isEqualTo("\"Mark\"");
+        assertThat(first.getOperator()).isEqualTo(Operator.EQUALS);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) ((BinaryExpr) comboExpr.getLeft()).getRight();
+        assertThat(toString(second.getRight())).isEqualTo("\"Mario\"");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+
+        HalfBinaryExpr third = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(third.getRight())).isEqualTo("\"Luca\"");
+        assertThat(third.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+    }
+
+    @Test
+    void testAndWithImplicitParameter() {
+        String expr = "name == \"Mark\" && == \"Mario\" && == \"Luca\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = ((BinaryExpr)((BinaryExpr) comboExpr.getLeft()).getLeft());
+        assertThat(toString(first.getLeft())).isEqualTo("name");
+        assertThat(toString(first.getRight())).isEqualTo("\"Mark\"");
+        assertThat(first.getOperator()).isEqualTo(Operator.EQUALS);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) ((BinaryExpr) comboExpr.getLeft()).getRight();
+        assertThat(toString(second.getRight())).isEqualTo("\"Mario\"");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+
+        HalfBinaryExpr third = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(third.getRight())).isEqualTo("\"Luca\"");
+        assertThat(third.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+    }
+
+    @Test
+    void testAndWithImplicitParameter2() {
+        String expr = "name == \"Mark\" && == \"Mario\" || == \"Luca\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+        assertThat(((BinaryExpr) (comboExpr.getLeft())).getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = ((BinaryExpr)((BinaryExpr) comboExpr.getLeft()).getLeft());
+        assertThat(toString(first.getLeft())).isEqualTo("name");
+        assertThat(toString(first.getRight())).isEqualTo("\"Mark\"");
+        assertThat(first.getOperator()).isEqualTo(Operator.EQUALS);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) ((BinaryExpr) comboExpr.getLeft()).getRight();
+        assertThat(toString(second.getRight())).isEqualTo("\"Mario\"");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+
+        HalfBinaryExpr third = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(third.getRight())).isEqualTo("\"Luca\"");
+        assertThat(third.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+    }
+
+    @Test
+    void testAndWithImplicitParameter3() {
+        String expr = "age == 2 && == 3 || == 4";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+
+
+        BinaryExpr comboExpr = ( (BinaryExpr) expression );
+        assertThat(comboExpr.getOperator()).isEqualTo(Operator.OR);
+        assertThat(((BinaryExpr) (comboExpr.getLeft())).getOperator()).isEqualTo(Operator.AND);
+
+        BinaryExpr first = ((BinaryExpr)((BinaryExpr) comboExpr.getLeft()).getLeft());
+        assertThat(toString(first.getLeft())).isEqualTo("age");
+        assertThat(toString(first.getRight())).isEqualTo("2");
+        assertThat(first.getOperator()).isEqualTo(Operator.EQUALS);
+
+        HalfBinaryExpr second = (HalfBinaryExpr) ((BinaryExpr) comboExpr.getLeft()).getRight();
+        assertThat(toString(second.getRight())).isEqualTo("3");
+        assertThat(second.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+
+        HalfBinaryExpr third = (HalfBinaryExpr) comboExpr.getRight();
+        assertThat(toString(third.getRight())).isEqualTo("4");
+        assertThat(third.getOperator()).isEqualTo(HalfBinaryExpr.Operator.EQUALS);
+    }
+
+    @Test
+    public void dotFreeWithRegexp() {
+        String expr = "name matches \"[a-z]*\"";
+        Expression expression = parseExpression( parser, expr ).getExpr();
+        assertThat(expression).isInstanceOf(PointFreeExpr.class);
+        assertThat(printNode(expression)).isEqualTo("name matches \"[a-z]*\"");
+        PointFreeExpr e = (PointFreeExpr)expression;
+        assertThat(e.getOperator().asString()).isEqualTo("matches");
+        assertThat(toString(e.getLeft())).isEqualTo("name");
+        assertThat(toString(e.getRight().get(0))).isEqualTo("\"[a-z]*\"");
+    }
+
+    @Test
+    public void implicitOperatorWithRegexps() {
+        String expr = "name matches \"[a-z]*\" || matches \"pippo\"";
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(printNode(expression)).isEqualTo("name matches \"[a-z]*\" || matches \"pippo\"");
+    }
+
+    @Test
+    public void halfPointFreeExpr() {
+        String expr = "matches \"[A-Z]*\"";
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(expression).isInstanceOf(HalfPointFreeExpr.class);
+        assertThat(printNode(expression)).isEqualTo("matches \"[A-Z]*\"");
+    }
+
+    @Test
+    public void halfPointFreeExprNegated() {
+        String expr = "not matches \"[A-Z]*\"";
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(expression).isInstanceOf(HalfPointFreeExpr.class);
+        assertThat(printNode(expression)).isEqualTo("not matches \"[A-Z]*\"");
+    }
+
+    @Test
+    public void regressionTestHalfPointFree() {
+        assertThat(parseExpression(parser, "getAddress().getAddressName().length() == 5").getExpr()).isInstanceOf(BinaryExpr.class);
+        assertThat(parseExpression(parser, "isFortyYearsOld(this, true)").getExpr()).isInstanceOf(MethodCallExpr.class);
+        assertThat(parseExpression(parser, "getName().startsWith(\"M\")").getExpr()).isInstanceOf(MethodCallExpr.class);
+        assertThat(parseExpression(parser, "isPositive($i.intValue())").getExpr()).isInstanceOf(MethodCallExpr.class);
+        assertThat(parseExpression(parser, "someEntity.someString in (\"1.500\")").getExpr()).isInstanceOf(PointFreeExpr.class);
+    }
+
+    @Test
+    public void mvelSquareBracketsOperators() {
+        testMvelSquareOperator("this str[startsWith] \"M\"", "str[startsWith]", "this", "\"M\"", false);
+        testMvelSquareOperator("this not str[startsWith] \"M\"", "str[startsWith]", "this", "\"M\"", true);
+        testMvelSquareOperator("this str[endsWith] \"K\"", "str[endsWith]", "this", "\"K\"", false);
+        testMvelSquareOperator("this str[length] 17", "str[length]", "this", "17", false);
+    }
+
+    @Test
+    public void halfPointFreeMVEL() {
+        String expr = "this str[startsWith] \"M\" || str[startsWith] \"E\"";
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(printNode(expression)).isEqualTo("this str[startsWith] \"M\" || str[startsWith] \"E\"");
+
+        Expression expression2 = parseExpression(parser, "str[startsWith] \"E\"").getExpr();
+        assertThat(expression2).isInstanceOf(HalfPointFreeExpr.class);
+        assertThat(printNode(expression2)).isEqualTo("str[startsWith] \"E\"");
+    }
+
+
+    @Test
+    void testLambda() {
+        String expr = "x -> y";
+        DrlxExpression expression = parseExpression(parser, expr);
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testLambdaParameter() {
+        String expr = "($p).setCanDrinkLambda(() -> true)";
+        DrlxExpression expression = parseExpression(parser, expr);
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testModifyStatement() {
+        String expr = "{ modify ( $p )  { name = \"Luca\"; age = \"35\"; } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    modify ($p) { name = \"Luca\"; age = \"35\"; }" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testModifyFailing() {
+        assertThrows(ParseProblemException.class, () -> {
+            String expr = "{ modify  { name = \"Luca\", age = \"35\" }; }";
+            StaticMvelParser.parseBlock(expr);
+        });
+    }
+
+    @Test
+    void testModifyStatementSemicolon() {
+        String expr = "{ modify ( $p )  { name = \"Luca\"; }; }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),"{ modify ($p) { name = \"Luca\"; }; }");
+    }
+
+    @Test
+    void testModifySemiColon() {
+        String expr = "{ modify($p) { setAge(1); } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+
+        verifyBodyWithBetterDiff(printNode(expression),"{ modify ($p) { setAge(1); } }");
+    }
+
+    @Test
+    void testModifyMultiple() {
+        String expr = "{ modify($p) { setAge(1);" + newLine() + " setAge(2); setAge(3);" + newLine() + "setAge(4); } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    modify ($p) { setAge(1); setAge(2); setAge(3); setAge(4); }" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testModifyEmptyBlock() {
+        String expr = "{ modify( $s ) { } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    modify ($s) {  }" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testModifyWithoutSemicolon() {
+        String expr = "{modify($p) { setAge($p.getAge()+1); } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    modify ($p) { setAge($p.getAge() + 1); }" + newLine() +
+                "}");
+    }
+
+
+    @Test
+    void testModifyWithCast() {
+        String expr = "{modify( (BooleanEvent)$toEdit.get(0) ){  }}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    modify ((BooleanEvent) $toEdit.get(0)) {  }" + newLine() +
+                "}");
+    }
+    
+    
+    @Test
+    void testWithStatement() {
+        String expr = "{ with ( $p )  { name = \"Luca\"; age = \"35\"; }; }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),"{" + newLine() +
+                                                       "    with ($p) { name = \"Luca\"; age = \"35\"; };" + newLine() +
+                                                       "}");
+    }
+
+    @Test
+    void testWithFailing() {
+        assertThrows(ParseProblemException.class, () -> {
+            String expr = "{ with  { name = \"Luca\", age = \"35\" }; }";
+            StaticMvelParser.parseBlock(expr);
+        });
+    }
+
+    @Test
+    void testWithStatementSemicolon() {
+        String expr = "{ with ( $p )  { name = \"Luca\"; }; }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),
+                "{" + newLine() +
+                "    with ($p) { name = \"Luca\"; };" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testWithSemiColon() {
+        String expr = "{ with($p) { setAge(1); }; }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),
+                                 "{" + newLine() +
+                                 "    with ($p) { setAge(1); };" + newLine() +
+                                 "}");
+    }
+
+    @Test
+    void testWithEmptyBlock() {
+        String expr = "{ with( $s ) { } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),
+                                 "{" + newLine() +
+                                 "    with ($s) {  }" + newLine() +
+                                 "}");
+    }
+
+    @Test
+    void testWithWithoutSemicolon() {
+        String expr = "{with($p) { setAge($p.getAge()+1); } }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),
+                                 "{" + newLine() +
+                                 "    with ($p) { setAge($p.getAge() + 1); }" + newLine() +
+                                 "}");
+    }
+
+
+    @Test
+    void testWithWithCast() {
+        String expr = "{with( (BooleanEvent)$toEdit.get(0) ){  }}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    with ((BooleanEvent) $toEdit.get(0)) {  }" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testWithConstructor() {
+        String expr = "{ with(s1 = new Some()) { }; }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),
+                                 "{" + newLine() +
+                                 "    with (s1 = new Some()) {  };" + newLine() +
+                                 "}");
+    }
+
+    @Test
+    void testSemicolon() {
+        String expr = "{             " +
+                        "a();" + newLine() +
+                        "b();" + newLine() +
+                        "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    a();" + newLine() +
+                "    b();" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testSemicolonMethod() {
+        String expr = "{             " +
+                "delete($person);" + newLine() +
+                "delete($pet);" + newLine() +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    delete($person);" + newLine() +
+                "    delete($pet);" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testSemicolonMethodComment() {
+        String expr = "{             " +
+                "delete($person); // comment" + newLine() +
+                "delete($pet); // comment " + newLine() +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    delete($person);" + newLine() +
+                "    delete($pet);" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testSemicolonMethodCommentOppositeOSLineEndings() {
+        final String oppositeLineEnding = SystemUtils.IS_OS_WINDOWS ? "\n" : "\r\n";
+        String expr = "{             " +
+                "delete($person); // comment" + oppositeLineEnding +
+                "delete($pet) ;// comment" + oppositeLineEnding +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    delete($person);" + newLine() +
+                "    delete($pet);" + newLine() +
+                "}");
+    }
+
+    @Test
+    public void statementsWithComments() {
+        String expr = "{             " +
+                "delete($person); // comment" + newLine() +
+                "delete($pet); // comment " + newLine() +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    delete($person);" + newLine() +
+                "    delete($pet);" + newLine() +
+                "}");
+    }
+
+
+    @Test
+    public void singleLineBlock() {
+        String expr = "{ delete($person); } // comment ";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    delete($person);" + newLine() +
+                "}");
+    }
+
+    @Test
+    public void commentsWithEmptyStatements() {
+        String expr = "{" +
+                "// modify ; something" + newLine() +
+                "/* modify ; something */" + newLine() +
+                "setAge(47);" + newLine() +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    setAge(47);" + newLine() +
+                "}");
+    }
+
+    @Test
+    public void newLineInFunctionCall() {
+        String expr = "{" +
+                "func(x " + newLine() +
+                ");" + newLine() +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(printNode(expression)).isEqualTo("{" + newLine() +
+                "    func(x);" + newLine() +
+                "}");
+    }
+
+    @Test
+    public void newLineInFunctionCall2() {
+        Expression expression = StaticMvelParser.parseExpression("func(x," + newLine() + " 2)");
+        assertThat(printNode(expression)).isEqualTo("func(x, 2)");
+    }
+
+    @Test
+    public void newLineInFunctionCall3() {
+        Expression expression = StaticMvelParser.parseExpression("func(x" + newLine() + ", 2)");
+        assertThat(printNode(expression)).isEqualTo("func(x, 2)");
+    }
+
+    @Test
+    public void commentsWithEmptyStatements2() {
+        String expr = "{" +
+                "  globalA.add(\"A\");" + newLine() +
+                "  modify( $p ) {" + newLine() +
+                "    // modify ; something" + newLine() +
+                "    /* modify ; something */" + newLine() +
+                "    setAge(47);" + newLine() +
+                "  }" + newLine() +
+                "  globalB.add(\"B\");" + newLine() +
+                "  // modify ; something" + newLine() +
+                "  /* modify ; something */" +
+                "}";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),"{" + newLine() +
+                "    globalA.add(\"A\");" + newLine() +
+                "    modify ($p) { setAge(47); }" + newLine() +
+                "    globalB.add(\"B\");" + newLine() +
+                "}");
+
+    }
+
+    @Test
+    void testModifyLambda() {
+        String expr = "{  modify($p) {  setCanDrinkLambda(() -> true); } }";
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        verifyBodyWithBetterDiff(printNode(expression),"{" + newLine() +
+                "    modify ($p) { setCanDrinkLambda(() -> true); }" + newLine() +
+                "}");
+    }
+
+    @Test
+    void testNewExpression() {
+        String expr = "money == new BigInteger(\"3\")";
+
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testArrayCreation() {
+        String expr = "new Object[] { \"getMessageId\", ($s != null ? $s : \"42103\") }";
+
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+
+    @Test
+    void testArrayCreation2() {
+    String expr = "functions.arrayContainsInstanceWithParameters((Object[]) $f.getPersons())";
+
+        Expression expression = parseExpression(parser, expr).getExpr();
+        assertThat(printNode(expression)).isEqualTo(expr);
+    }
+
+    @Test
+    void testSpecialNewlineHandling() {
+        String expr = "{ a(); \nprint(1); }";
+
+        BlockStmt expression = StaticMvelParser.parseBlock(expr);
+        assertThat(expression.getStatements().size()).as("There should be 2 statements").isEqualTo(2);
+        verifyBodyWithBetterDiff(printNode(expression), "{ a(); \nprint(1); }");
+    }
+
+    @Test
+    void testLineBreakAtTheEndOfStatementWithoutSemicolon() {
+        String expr =
+                "{  Person p2 = new Person(\"John\");\n" +
+                "  p2.age = 30\n" + // a line break at the end of the statement without a semicolon
+                "insert(p2);\n }";
+
+        StaticMvelParser mvelParser = new StaticMvelParser(new ParserConfiguration(), true);
+        ParseResult<BlockStmt> r = mvelParser.parse(GeneratedMvelParser::BlockParseStart, new StringProvider(expr));
+        BlockStmt blockStmt = r.getResult().get();
+        assertThat(blockStmt.getStatements().size()).as("Should parse 3 statements").isEqualTo(3);
+    }
+
+    private void testMvelSquareOperator(String wholeExpression, String operator, String left, String right, boolean isNegated) {
+        String expr = wholeExpression;
+        Expression expression = parseExpression(parser, expr ).getExpr();
+        assertThat(expression).isInstanceOf(PointFreeExpr.class);
+        assertThat(printNode(expression)).isEqualTo(wholeExpression);
+        PointFreeExpr e = (PointFreeExpr)expression;
+        assertThat(e.getOperator().asString()).isEqualTo(operator);
+        assertThat(toString(e.getLeft())).isEqualTo(left);
+        assertThat(toString(e.getRight().get(0))).isEqualTo(right);
+        assertThat(e.isNegated()).isEqualTo(isNegated);
+    }
+
+    private String toString(Node n) {
+        return PrintUtil.printNode(n);
+    }
+
+    private String newLine() {
+        return System.lineSeparator();
+    }
+
+    @Test
+    void testBindVariable() {
+        String expr = "$n : name == \"Mark\"";
+        DrlxExpression drlxExpression = parseExpression( parser, expr );
+        SimpleName bind = drlxExpression.getBind();
+        assertThat(bind.asString()).isEqualTo("$n");
+
+        Expression expression = drlxExpression.getExpr();
+        BinaryExpr binaryExpr = ( (BinaryExpr) expression );
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mark\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+    }
+
+    @Test
+    void testEnclosedBindVariable() {
+        String expr = "($n : name == \"Mario\")";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression enclosedExpr = drlxExpression.getExpr();
+        assertThat(enclosedExpr instanceof EnclosedExpr).isTrue();
+        Expression inner = ((EnclosedExpr) enclosedExpr).getInner();
+        assertThat(inner instanceof DrlxExpression).isTrue();
+        DrlxExpression innerDrlxExpression = (DrlxExpression) inner;
+
+        SimpleName bind = innerDrlxExpression.getBind();
+        assertThat(bind.asString()).isEqualTo("$n");
+
+        Expression expression = innerDrlxExpression.getExpr();
+        BinaryExpr binaryExpr = ((BinaryExpr) expression);
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+    }
+
+    @Test
+    void testComplexEnclosedBindVariable() {
+        String expr = "($n : name == \"Mario\") && (age > 20)";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression bExpr = drlxExpression.getExpr();
+        assertThat(bExpr instanceof BinaryExpr).isTrue();
+
+        Node left = ((BinaryExpr) bExpr).getLeft();
+        assertThat(left instanceof EnclosedExpr).isTrue();
+        Expression inner = ((EnclosedExpr) left).getInner();
+        assertThat(inner instanceof DrlxExpression).isTrue();
+        DrlxExpression innerDrlxExpression = (DrlxExpression) inner;
+
+        SimpleName bind = innerDrlxExpression.getBind();
+        assertThat(bind.asString()).isEqualTo("$n");
+
+        Expression expression = innerDrlxExpression.getExpr();
+        BinaryExpr binaryExpr = ((BinaryExpr) expression);
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+
+        Node right = ((BinaryExpr) bExpr).getRight();
+        assertThat(right instanceof EnclosedExpr).isTrue();
+        Expression expression2 = ((EnclosedExpr) right).getInner();
+
+        BinaryExpr binaryExpr2 = ((BinaryExpr) expression2);
+        assertThat(toString(binaryExpr2.getLeft())).isEqualTo("age");
+        assertThat(toString(binaryExpr2.getRight())).isEqualTo("20");
+        assertThat(binaryExpr2.getOperator()).isEqualTo(Operator.GREATER);
+    }
+
+    @Test
+    void testBindingOnRight() {
+        String expr = "$n : name == \"Mario\" && $a : age > 20";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression bExpr = drlxExpression.getExpr();
+        assertThat(bExpr instanceof BinaryExpr).isTrue();
+
+        Node left = ((BinaryExpr) bExpr).getLeft();
+        assertThat(left instanceof DrlxExpression).isTrue();
+        DrlxExpression leftExpr = (DrlxExpression) left;
+
+        SimpleName leftBind = leftExpr.getBind();
+        assertThat(leftBind.asString()).isEqualTo("$n");
+
+        Expression expression = leftExpr.getExpr();
+        BinaryExpr binaryExpr = ((BinaryExpr) expression);
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+
+        Node right = ((BinaryExpr) bExpr).getRight();
+        assertThat(right instanceof DrlxExpression).isTrue();
+        DrlxExpression rightExpr = (DrlxExpression) right;
+
+        SimpleName rightBind = rightExpr.getBind();
+        assertThat(rightBind.asString()).isEqualTo("$a");
+
+        BinaryExpr binaryExpr2 = ((BinaryExpr) rightExpr.getExpr());
+        assertThat(toString(binaryExpr2.getLeft())).isEqualTo("age");
+        assertThat(toString(binaryExpr2.getRight())).isEqualTo("20");
+        assertThat(binaryExpr2.getOperator()).isEqualTo(Operator.GREATER);
+    }
+
+    @Test
+    void test3BindingOn3Conditions() {
+        String expr = "$n : name == \"Mario\" && $a : age > 20 && $l : likes != null";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression bExpr = drlxExpression.getExpr();
+        assertThat(bExpr instanceof BinaryExpr).isTrue();
+
+        Expression left = ((BinaryExpr) bExpr).getLeft();
+        assertThat(left instanceof BinaryExpr).isTrue();
+        BinaryExpr leftExpr = (BinaryExpr) left;
+
+        DrlxExpression first = (DrlxExpression) leftExpr.getLeft();
+        DrlxExpression second = (DrlxExpression) leftExpr.getRight();
+        DrlxExpression third = (DrlxExpression) ((BinaryExpr) bExpr).getRight();
+
+        SimpleName bind = first.getBind();
+        assertThat(bind.asString()).isEqualTo("$n");
+        BinaryExpr binaryExpr = ((BinaryExpr) first.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+
+        bind = second.getBind();
+        assertThat(bind.asString()).isEqualTo("$a");
+        binaryExpr = ((BinaryExpr) second.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("age");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("20");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.GREATER);
+
+        bind = third.getBind();
+        assertThat(bind.asString()).isEqualTo("$l");
+        binaryExpr = ((BinaryExpr) third.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("likes");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("null");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.NOT_EQUALS);
+    }
+
+    @Test
+    void testBindingOnRightWithOr() {
+        String expr = "$n : name == \"Mario\" || $a : age > 20";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression bExpr = drlxExpression.getExpr();
+        assertThat(bExpr instanceof BinaryExpr).isTrue();
+        assertThat(((BinaryExpr) bExpr).getOperator() == Operator.OR).isTrue();
+
+        Node left = ((BinaryExpr) bExpr).getLeft();
+        assertThat(left instanceof DrlxExpression).isTrue();
+        DrlxExpression leftExpr = (DrlxExpression) left;
+
+        SimpleName leftBind = leftExpr.getBind();
+        assertThat(leftBind.asString()).isEqualTo("$n");
+
+        Expression expression = leftExpr.getExpr();
+        BinaryExpr binaryExpr = ((BinaryExpr) expression);
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+
+        Node right = ((BinaryExpr) bExpr).getRight();
+        assertThat(right instanceof DrlxExpression).isTrue();
+        DrlxExpression rightExpr = (DrlxExpression) right;
+
+        SimpleName rightBind = rightExpr.getBind();
+        assertThat(rightBind.asString()).isEqualTo("$a");
+
+        BinaryExpr binaryExpr2 = ((BinaryExpr) rightExpr.getExpr());
+        assertThat(toString(binaryExpr2.getLeft())).isEqualTo("age");
+        assertThat(toString(binaryExpr2.getRight())).isEqualTo("20");
+        assertThat(binaryExpr2.getOperator()).isEqualTo(Operator.GREATER);
+    }
+
+    @Test
+    void test3BindingOn3ConditionsWithOrAnd() {
+        String expr = "$n : name == \"Mario\" || $a : age > 20 && $l : likes != null";
+
+        DrlxExpression drlxExpression = parseExpression(parser, expr);
+        Expression bExpr = drlxExpression.getExpr();
+        assertThat(bExpr instanceof BinaryExpr).isTrue();
+        assertThat(((BinaryExpr) bExpr).getOperator() == Operator.OR).isTrue();
+
+        Expression left = ((BinaryExpr) bExpr).getLeft();
+        assertThat(left instanceof DrlxExpression).isTrue();
+
+        Expression right = ((BinaryExpr) bExpr).getRight();
+        assertThat(right instanceof BinaryExpr).isTrue();
+        BinaryExpr rightExpr = (BinaryExpr) right;
+        assertThat(rightExpr.getOperator() == Operator.AND).isTrue();
+
+        DrlxExpression first = (DrlxExpression) left;
+        DrlxExpression second = (DrlxExpression) rightExpr.getLeft();
+        DrlxExpression third = (DrlxExpression) rightExpr.getRight();
+
+        SimpleName bind = first.getBind();
+        assertThat(bind.asString()).isEqualTo("$n");
+        BinaryExpr binaryExpr = ((BinaryExpr) first.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("name");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("\"Mario\"");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.EQUALS);
+
+        bind = second.getBind();
+        assertThat(bind.asString()).isEqualTo("$a");
+        binaryExpr = ((BinaryExpr) second.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("age");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("20");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.GREATER);
+
+        bind = third.getBind();
+        assertThat(bind.asString()).isEqualTo("$l");
+        binaryExpr = ((BinaryExpr) third.getExpr());
+        assertThat(toString(binaryExpr.getLeft())).isEqualTo("likes");
+        assertThat(toString(binaryExpr.getRight())).isEqualTo("null");
+        assertThat(binaryExpr.getOperator()).isEqualTo(Operator.NOT_EQUALS);
+    }
+}
